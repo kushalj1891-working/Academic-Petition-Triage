@@ -1,51 +1,100 @@
 # Academic Regulation and Student Petition Triage Service
 
-Local, evidence-grounded decision support for synthetic academic petitions. The demonstrator uses University of Delhi Ordinance VII clauses for attendance. It never issues an official decision; all discretionary and uncertain cases route to a human.
+Local, evidence-grounded decision support for **synthetic** academic petitions. The prototype retrieves University of Delhi Ordinance VII attendance clauses, checks citations against the corpus, and routes discretionary or unsupported cases to a human officer. It does not issue official decisions.
 
-## Start
+## Start locally
 
-Prerequisite: Docker Desktop with Compose v2.
+**Prerequisite:** Docker Desktop with Docker Compose v2.
+
+From the project folder, run:
 
 ```powershell
-Copy-Item .env.example .env
 docker compose up --build -d
 docker compose ps
 ```
 
-Open <http://localhost:8000/>. Submit the included sample synthetic medical attendance case, then watch the result and clause citations. API docs are at <http://localhost:8000/docs>. Health: <http://localhost:8000/health>. Metrics: <http://localhost:8000/metrics>. Prometheus: <http://localhost:9090>. Grafana: <http://localhost:3000> (anonymous read-only access for this local demo). Jaeger traces: <http://localhost:16686>.
+Open the web form at <http://localhost:8000/>. The API documentation is at <http://localhost:8000/docs>. You can also view service health at <http://localhost:8000/health>, Prometheus metrics at <http://localhost:8000/metrics>, Prometheus at <http://localhost:9090>, Grafana at <http://localhost:3000>, and Jaeger traces at <http://localhost:16686>. Grafana allows anonymous read-only access in this local demo.
 
-Example:
+### Example synthetic request (PowerShell)
 
 ```powershell
-$p = @{petition_id='SYN-01';petition_type='attendance';text='Serious illness caused attendance shortage; medical certificate is available. Please review the attendance rule.';attendance_percent=62;medical_documented=$true;semester='I'} | ConvertTo-Json
-$run = Invoke-RestMethod -Method Post -Uri http://localhost:8000/v1/runs -ContentType application/json -Body $p
-Invoke-RestMethod "http://localhost:8000$($run.status_url)"
+$p = @{
+  petition_id = 'SYN-01'
+  petition_type = 'attendance'
+  text = 'Serious illness caused attendance shortage; a medical certificate is available. Please review the attendance rule.'
+  attendance_percent = 62
+  medical_documented = $true
+  semester = 'I'
+} | ConvertTo-Json
+
+$run = Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/v1/runs' -ContentType 'application/json' -Body $p
+do {
+  Start-Sleep -Milliseconds 500
+  $status = Invoke-RestMethod "http://localhost:8000$($run.status_url)"
+} while ($status.status -in @('queued', 'running'))
+$status.result
 ```
+
+The example should be referred for human review because the medical-hardship provision is discretionary. Use only synthetic information.
 
 ## Services and commands
 
-Compose starts six services: the FastAPI API, asynchronous Redis queue, separate agent-worker, Prometheus, Grafana, and Jaeger. SQLite run/feedback records and Redis state use named volumes. Three worker instances can be started with `docker compose up -d --scale agent-worker=3`; compare throughput and p95 at `/metrics` and in Locust. Run the optional stub load generator with `locust -f locustfile.py --host http://localhost:8000`.
+Compose starts six services: FastAPI API, Redis queue, separate agent worker, Prometheus, Grafana, and Jaeger. The browser UI is a client, not a Compose service. SQLite run and feedback records and Redis queue data use named volumes.
 
-To use vector embeddings, set an approved free local model identifier in `EMBEDDING_MODEL` in your local `.env`, then rebuild with `docker compose run --rm agent-worker python -m app.ingest`. Without that runtime configuration, the checked-in corpus uses a deterministic lexical fallback. Run the deterministic offline scenario evaluation in an environment with project dependencies installed: `python evals/run_eval.py`; output is written to `evals/latest-results.json`. No measured performance or quality baseline is claimed in advance.
+To scale the worker for a local comparison:
 
-Stop with `docker compose down`. `docker compose down -v` deletes local demo data.
+```powershell
+docker compose up -d --scale agent-worker=3
+```
+
+The Locust profile is in `locustfile.py`. With Locust installed, run `locust -f locustfile.py --host http://localhost:8000` and use the Locust page to start a load. Locust measures individual HTTP request latency; this is different from complete petition-processing time.
+
+The checked-in corpus works with deterministic lexical retrieval by default. To enable local vector embeddings, set a free local model identifier in `EMBEDDING_MODEL` in your local `.env`, then rebuild the index:
+
+```powershell
+docker compose run --rm agent-worker python -m app.ingest
+```
+
+Run the 20-scenario deterministic evaluation from an environment where the project dependencies are installed:
+
+```powershell
+python -m pip install -r requirements.txt
+python evals/run_eval.py
+```
+
+The result is written to `evals/latest-results.json`. Stop the services with `docker compose down`. `docker compose down -v` also deletes the local demo data.
+
+## Evaluation and load-test results
+
+The synthetic evaluation initially passed **19 of 20** scenarios. Scenario E09 exposed a missed medical-context keyword (“illness”). After adding that keyword, the same evaluation passed **20 of 20** scenarios. This is a result on the included synthetic scenarios, not a production accuracy claim.
+
+Locust initially reported **92% failures at about 10.9 requests/second**, mainly because both submissions and status polling shared the rate limit. After rate limiting was restricted to submissions, a run at the normal cap still rejected burst submissions (28% overall failures). For the worker comparison, the submission limit was temporarily raised to 1,000 per minute:
+
+| Worker count | HTTP requests | Failures | Throughput | HTTP-request p95 |
+|---:|---:|---:|---:|---:|
+| 1 | 991 | 0 | 16.02 requests/s | 48 ms |
+| 3 | 990 | 0 | 16.16 requests/s | 52 ms |
+
+These approximately one-minute tests used five users. The three-worker run showed no meaningful throughput benefit at this load. The measured p95 values are for individual HTTP requests, not complete petitions. The proposed target for individual API request p95 is **250 ms** under this test load; both runs met it. The proposed complete petition p95 target is **10 seconds**, but it has not been measured. See `docs/evidence/` for the Locust exports and screenshots.
+
+The application makes no model calls, so external model inference cost is **$0 per 100 runs**. Local compute and operating costs were not metered.
 
 ## Data and safety
 
-Only synthetic petitions. Never enter real student identifiers, academic records, or medical information. Sources and scope are in [docs/corpus-sources.md](docs/corpus-sources.md); coverage, known gaps, and unmeasured items are in [docs/limitations.md](docs/limitations.md). See [docs/runbook.md](docs/runbook.md) for recovery steps and incident notes; [docs/architecture.md](docs/architecture.md) for topology.
+Use synthetic petitions only. Never enter real student identifiers, academic records, or medical information. Review [docs/corpus-sources.md](docs/corpus-sources.md) for sources and scope, [docs/limitations.md](docs/limitations.md) for known gaps, [docs/runbook.md](docs/runbook.md) for recovery steps, and [docs/architecture.md](docs/architecture.md) for the system topology.
 
 ## Project map
 
 ```text
-app/                 API, graph agents, retrieval, worker, SQLite and metrics
-data/corpus.json     Curated sourced DU Ordinance VII clause excerpts
-evals/               20 scenarios, prompt versions, evaluation runner
-docs/                Architecture, corpus provenance, runbook, known limitations
+app/                 API, LangGraph roles, retrieval, worker, SQLite and metrics
+data/corpus.json     Curated University of Delhi Ordinance VII clause excerpts
+evals/               20 scenarios, prompt versions, evaluation runner and results
+docs/                Architecture, corpus sources, runbook, limitations and evidence
 monitoring/           Prometheus scrape configuration
-grafana/              Datasource provisioning
-report/                IEEE-style report source
+grafana/              Grafana datasource provisioning
+report/                Editable project report source
 outputs/               Final report PDF
 Dockerfile             Shared API/worker image
-docker-compose.yml     Five-service local stack
-locustfile.py          Stub-provider load test profile
+docker-compose.yml     Six-service local stack
+locustfile.py          Synthetic stub load-test profile
 ```
